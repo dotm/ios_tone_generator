@@ -8,9 +8,6 @@
 
 import UIKit
 
-class SoundButton: UIView {
-    
-}
 class ViewController: UIViewController {
     private var unit: ToneOutputUnit! = ToneOutputUnit()
     private weak var toneSlider: UISlider!
@@ -20,7 +17,7 @@ class ViewController: UIViewController {
             frequencyLabel.text = "\(toneFrequency) Hz"
         }
     }
-
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         // Do any additional setup after loading the view, typically from a nib.
@@ -59,6 +56,7 @@ class ViewController: UIViewController {
         
         toneSlider = slider
     }
+    
     private func setupPlayButton(){
         let button = UIButton()
         button.backgroundColor = .blue
@@ -79,7 +77,6 @@ class ViewController: UIViewController {
     }
     @objc func stopTone(_ sender: UIButton){
         sender.backgroundColor = .blue
-        
         unit.stop()
     }
     @objc func playTone(_ sender: UIButton){
@@ -91,13 +88,6 @@ class ViewController: UIViewController {
         unit.setToneVolume(volume: 0.5)
         unit.startToneForDuration(time: 10)
     }
-
-    override func didReceiveMemoryWarning() {
-        super.didReceiveMemoryWarning()
-        // Dispose of any resources that can be recreated.
-    }
-
-
 }
 
 import Foundation
@@ -105,25 +95,20 @@ import AudioUnit
 import AVFoundation
 
 final class ToneOutputUnit: NSObject {
-    
     private var audioUnit: AUAudioUnit! = nil
     private var audioUnit_isRunning = false
     private var audioSession_isActive = false
     
+    var toneCount: Int32 = 0            // number of samples of tone to play.  0 for silence
+    
     private var sampleRate : Double = 44100.0    // typical audio sample rate
-    
     private var f0 = 880.0              // default frequency of tone:   'A' above Concert A
-    private var v0 = 16383.0              // default volume of tone:      half full scale
-    
-    var toneCount: Int32 = 0       // number of samples of tone to play.  0 for silence
-    
-    private var phY =     0.0       // save phase of sine wave to prevent clicking
+    private var v0 = 16383.0            // default volume of tone:      half full scale
+    private var phY =     0.0           // save phase of sine wave to prevent clicking
     private var interrupted = false     // for restart from audio interruption notification
     
     func startToneForDuration(time : Double) {
-        if !audioUnit_isRunning {
-            enableSpeaker()
-        }
+        if !audioUnit_isRunning { enableSpeaker() }
         if toneCount == 0 {         // only play a tone if the last tone has stopped
             toneCount = Int32(time * sampleRate)
         }
@@ -140,55 +125,44 @@ final class ToneOutputUnit: NSObject {
     }
     
     func enableSpeaker() {
-        
         if audioUnit_isRunning { return }           // return if RemoteIO is already running
         
         if (!audioSession_isActive) {
             setAndActivate_audioSession()
         }
         
-        do {        // not running, so start hardware
-            
-            let audioComponentDescription = AudioComponentDescription(
-                componentType: kAudioUnitType_Output,
-                componentSubType: kAudioUnitSubType_RemoteIO,
-                componentManufacturer: kAudioUnitManufacturer_Apple,
-                componentFlags: 0,
-                componentFlagsMask: 0 )
-            
-            if (audioUnit == nil) {
-                
+        do {
+            if (audioUnit == nil) { // not running, so start hardware
+                let audioComponentDescription = AudioComponentDescription(
+                    componentType: kAudioUnitType_Output,
+                    componentSubType: kAudioUnitSubType_RemoteIO,
+                    componentManufacturer: kAudioUnitManufacturer_Apple,
+                    componentFlags: 0,
+                    componentFlagsMask: 0
+                )
                 try audioUnit = AUAudioUnit(componentDescription: audioComponentDescription)
-                
                 let bus0 = audioUnit.inputBusses[0]
-                
                 let audioFormat = AVAudioFormat(
                     commonFormat: AVAudioCommonFormat.pcmFormatInt16,   // short int samples
                     sampleRate: Double(sampleRate),
                     channels:AVAudioChannelCount(2),
-                    interleaved: true )                                 // interleaved stereo
+                    interleaved: true
+                )
+                try bus0.setFormat(audioFormat!)
                 
-                try bus0.setFormat(audioFormat!)  //      for speaker bus
-                
-                audioUnit.outputProvider = { (    //  AURenderPullInputBlock?
-                    actionFlags,
-                    timestamp,
-                    frameCount,
-                    inputBusNumber,
-                    inputDataList ) -> AUAudioUnitStatus in
-                    
+                audioUnit.outputProvider = {
+                    (actionFlags, timestamp, frameCount, inputBusNumber, inputDataList ) -> AUAudioUnitStatus in
                     self.fillSpeakerBuffer(inputDataList: inputDataList, frameCount: frameCount)
                     return(0)
                 }
             }
             
             audioUnit.isOutputEnabled = true
-            toneCount   =   0
+            toneCount = 0
             
             try audioUnit.allocateRenderResources()  //  v2 AudioUnitInitialize()
             try audioUnit.startHardware()            //  v2 AudioOutputUnitStart()
             audioUnit_isRunning = true
-            
         } catch /* let error as NSError */ {
             // handleError(error, functionName: "AUAudioUnit failed")
             // or assert(false)
@@ -220,7 +194,8 @@ final class ToneOutputUnit: NSObject {
                 forName: NSNotification.Name.AVAudioSessionInterruption,
                 object: nil,
                 queue: nil,
-                using: myAudioSessionInterruptionHandler )
+                using: myAudioSessionInterruptionHandler
+            )
             
             try audioSession.setActive(true)
             audioSession_isActive = true
@@ -230,59 +205,52 @@ final class ToneOutputUnit: NSObject {
     }
     
     // process RemoteIO Buffer for output
-    private func fillSpeakerBuffer(inputDataList : UnsafeMutablePointer<AudioBufferList>, frameCount : UInt32 ){
+    private func fillSpeakerBuffer(inputDataList: UnsafeMutablePointer<AudioBufferList>, frameCount: UInt32){
+        
         let inputDataPtr = UnsafeMutableAudioBufferListPointer(inputDataList)
-        let nBuffers = inputDataPtr.count
-        if (nBuffers > 0) {
+        guard inputDataPtr.count > 0 else {return}
+        
+        let mBuffers: AudioBuffer = inputDataPtr[0]
+
+        let count = Int(frameCount)
+        
+        // Speaker Output == play tone at frequency f0
+        if (self.v0 > 0) && (self.toneCount > 0){
+            var v  = self.v0
+            if v > 32767 { v = 32767 }
             
-            let mBuffers : AudioBuffer = inputDataPtr[0]
-            let count = Int(frameCount)
+            let sz = Int(mBuffers.mDataByteSize)
             
-            // Speaker Output == play tone at frequency f0
-            if (   self.v0 > 0)
-                && (self.toneCount > 0 )
-            {
-                // audioStalled = false
-                
-                var v  = self.v0 ; if v > 32767 { v = 32767 }
-                let sz = Int(mBuffers.mDataByteSize)
-                
-                var a  = self.phY        // capture from object for use inside block
-                let d  = 2.0 * Double.pi * self.f0 / self.sampleRate     // phase delta
-                
-                let bufferPointer = UnsafeMutableRawPointer(mBuffers.mData)
-                if var bptr = bufferPointer {
-                    for i in 0..<(count) {
-                        let u  = sin(a)             // create a sinewave
-                        a += d ; if (a > 2.0 * Double.pi) { a -= 2.0 * Double.pi }
-                        let x = Int16(v * u + 0.5)      // scale & round
-                        
-                        if (i < (sz / 2)) {
-                            bptr.assumingMemoryBound(to: Int16.self).pointee = x
-                            bptr += 2   // increment by 2 bytes for next Int16 item
-                            bptr.assumingMemoryBound(to: Int16.self).pointee = x
-                            bptr += 2   // stereo, so fill both Left & Right channels
-                        }
+            var a  = self.phY        // capture from object for use inside block
+            let d  = 2.0 * Double.pi * self.f0 / self.sampleRate     // phase delta
+            
+            let bufferPointer = UnsafeMutableRawPointer(mBuffers.mData)
+            if var bptr = bufferPointer {
+                for i in 0..<(count) {
+                    let u = sin(a)             // create a sinewave
+                    a += d ; if (a > 2.0 * Double.pi) { a -= 2.0 * Double.pi }
+                    let x = Int16(v * u + 0.5)      // scale & round
+                    
+                    if (i < (sz / 2)) {
+                        bptr.assumingMemoryBound(to: Int16.self).pointee = x
+                        bptr += 2   // increment by 2 bytes for next Int16 item
+                        bptr.assumingMemoryBound(to: Int16.self).pointee = x
+                        bptr += 2   // stereo, so fill both Left & Right channels
                     }
                 }
-                
-                self.phY        =   a                   // save sinewave phase
-                self.toneCount  -=  Int32(frameCount)   // decrement time remaining
-            } else {
-                // audioStalled = true
-                memset(mBuffers.mData, 0, Int(mBuffers.mDataByteSize))  // silence
             }
+            
+            self.phY = a                   // save sinewave phase
+            self.toneCount -= Int32(frameCount)   // decrement time remaining
+        } else {
+            memset(mBuffers.mData, 0, Int(mBuffers.mDataByteSize))  // silence
         }
     }
     
     private func myAudioSessionInterruptionHandler( notification: Notification ) -> Void {
-        guard  let interuptionType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] else {
-            return
-        }
+        guard  let interuptionType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] else { return }
         let interuptionValue = AVAudioSessionInterruptionType(rawValue: (interuptionType as AnyObject).uintValue)
-        guard interuptionValue == AVAudioSessionInterruptionType.began else {
-            return
-        }
+        guard interuptionValue == AVAudioSessionInterruptionType.began else { return }
         
         if (audioUnit_isRunning) {
             audioUnit.stopHardware()
